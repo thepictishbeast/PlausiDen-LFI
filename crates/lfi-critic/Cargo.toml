@@ -1,0 +1,21 @@
+[package]
+name = "lfi-critic"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "The Critic trait + NoopCritic + LfiCritic reference impl. The compiler-enforced seam between proposal generators and the commit boundary."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+lfi-core = { workspace = true }
+lfi-policy = { workspace = true }
+lfi-corpus = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"

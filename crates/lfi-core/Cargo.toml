@@ -1,0 +1,25 @@
+[package]
+name = "lfi-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Typed core transport for the Lattice of Formal Inference: Proposal, Decision, RuleId, Strength, Violation."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# Task #34 note: this crate declares the typed transport
+# layer only. The Neurosymbolic-Toolkit substrates (hdc-core,
+# neupsl, lnn, vsa, hdlm, math-codec) are imported by
+# downstream crates (lfi-corpus consumes hdc-core, lfi-policy
+# consumes neupsl, etc.) when they actually compute against
+# the substrate.
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"

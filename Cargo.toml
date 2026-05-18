@@ -1,0 +1,57 @@
+# PlausiDen-LFI — Lattice of Formal Inference
+#
+# Generic, use-case-agnostic neurosymbolic AI evaluation
+# substrate. Sits between any application and the
+# Neurosymbolic-Toolkit (HDC, NeuPSL, LNN, VSA, HDLM,
+# math-codec).
+#
+# This workspace is the UPSTREAM. Application-specific forks
+# (e.g. Forge-LFI) extend it with domain-tailored types,
+# policies, corpora, and Critic implementations. Upstream
+# improvements trickle downstream via:
+#
+#   cd Forge-LFI
+#   git fetch upstream && git merge upstream/main
+#
+# Architectural commitment: LFI is the brain, LLM is a
+# constrained candidate generator, the Critic trait is the
+# compiler-enforced seam. Every proposal flows through
+# `Proposal -> Critic::evaluate -> Decision`. Raw LLM output
+# bypassing the Critic is a compile error, not a policy.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/lfi-core",
+    "crates/lfi-policy",
+    "crates/lfi-corpus",
+    "crates/lfi-critic",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.78"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thepictishbeast/PlausiDen-LFI"
+
+[workspace.dependencies]
+lfi-core   = { path = "crates/lfi-core" }
+lfi-policy = { path = "crates/lfi-policy" }
+lfi-corpus = { path = "crates/lfi-corpus" }
+
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror  = "2"
+
+# Neurosymbolic-Toolkit substrates. The toolkit ships as a
+# multi-crate workspace (hdc-core, neupsl, lnn, vsa, hdlm,
+# math-codec, neurosymbolic). Downstream crates that actually
+# consume a substrate add the specific sub-crate as a git dep
+# with `package = "hdc-core"`-style syntax. lfi-core does not
+# yet consume any substrate (task #34 says "Cargo dep, no code
+# contributions") — the dep is wired here when the first
+# consumer needs it.
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
