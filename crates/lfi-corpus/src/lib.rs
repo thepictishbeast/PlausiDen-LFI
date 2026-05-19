@@ -139,7 +139,142 @@ impl Corpus {
             patterns: Vec::new(),
         }
     }
+
+    /// Look up a pattern by slug. Returns `None` if no pattern
+    /// with that slug exists in this corpus.
+    pub fn get(&self, slug: &str) -> Option<&Pattern> {
+        self.patterns.iter().find(|p| p.slug == slug)
+    }
+
+    /// True iff a pattern with the given slug exists.
+    pub fn contains(&self, slug: &str) -> bool {
+        self.get(slug).is_some()
+    }
+
+    /// Number of patterns in the corpus.
+    pub fn len(&self) -> usize {
+        self.patterns.len()
+    }
+
+    /// True iff the corpus has zero patterns.
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// Validate corpus invariants. Returns the list of every
+    /// violation found — empty Vec means the corpus is sound.
+    ///
+    /// Checks (in stable order):
+    ///
+    /// 1. Corpus `name` is non-empty.
+    /// 2. Corpus `version` is non-empty.
+    /// 3. No two patterns share a `slug` (slug is the
+    ///    similarity-lookup primary key — duplicates make
+    ///    cosine queries non-deterministic).
+    /// 4. Every pattern's `slug` is non-empty.
+    /// 5. Every pattern's `dim` matches the corpus's first
+    ///    pattern's dim (mixed-dim corpora can't be queried
+    ///    against a single probe vector).
+    /// 6. Tenant isolation: tenant-private retention requires
+    ///    `Some(tenant_id)`; reference retention requires
+    ///    `None`.
+    pub fn validate(&self) -> Vec<CorpusValidationError> {
+        let mut errors = Vec::new();
+        if self.name.is_empty() {
+            errors.push(CorpusValidationError::EmptyCorpusName);
+        }
+        if self.version.is_empty() {
+            errors.push(CorpusValidationError::EmptyCorpusVersion);
+        }
+        let mut seen_slugs: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let first_dim = self.patterns.first().map(|p| p.dim);
+        for pattern in &self.patterns {
+            if pattern.slug.is_empty() {
+                errors.push(CorpusValidationError::EmptyPatternSlug);
+            } else if !seen_slugs.insert(pattern.slug.clone()) {
+                errors.push(CorpusValidationError::DuplicatePatternSlug(
+                    pattern.slug.clone(),
+                ));
+            }
+            if let Some(d0) = first_dim {
+                if pattern.dim != d0 {
+                    errors.push(CorpusValidationError::MixedDimension {
+                        slug: pattern.slug.clone(),
+                        expected: d0,
+                        got: pattern.dim,
+                    });
+                }
+            }
+        }
+        match (self.retention, self.tenant_id.as_deref()) {
+            (RetentionClass::TenantPrivate, None) => {
+                errors.push(CorpusValidationError::TenantPrivateMissingTenant);
+            }
+            (RetentionClass::Reference, Some(_)) => {
+                errors.push(CorpusValidationError::ReferenceCorpusWithTenant);
+            }
+            _ => {}
+        }
+        errors
+    }
+
+    /// True iff `validate()` returns no errors.
+    pub fn is_valid(&self) -> bool {
+        self.validate().is_empty()
+    }
 }
+
+/// Validation errors returned by [`Corpus::validate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CorpusValidationError {
+    /// `corpus.name` is empty.
+    EmptyCorpusName,
+    /// `corpus.version` is empty.
+    EmptyCorpusVersion,
+    /// Two patterns share this slug.
+    DuplicatePatternSlug(String),
+    /// A pattern has an empty slug.
+    EmptyPatternSlug,
+    /// A pattern's `dim` differs from the corpus's first
+    /// pattern's `dim` — corpus is mixed-dimension.
+    MixedDimension {
+        /// Offending pattern's slug.
+        slug: String,
+        /// Dim expected (from first pattern).
+        expected: usize,
+        /// Dim found on this pattern.
+        got: usize,
+    },
+    /// Retention is `TenantPrivate` but `tenant_id` is `None`.
+    TenantPrivateMissingTenant,
+    /// Retention is `Reference` but `tenant_id` is `Some` —
+    /// a curated corpus must not be scoped to a tenant.
+    ReferenceCorpusWithTenant,
+}
+
+impl std::fmt::Display for CorpusValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyCorpusName => write!(f, "corpus.name is empty"),
+            Self::EmptyCorpusVersion => write!(f, "corpus.version is empty"),
+            Self::DuplicatePatternSlug(s) => write!(f, "duplicate pattern slug: {s}"),
+            Self::EmptyPatternSlug => write!(f, "pattern has empty slug"),
+            Self::MixedDimension { slug, expected, got } => write!(
+                f,
+                "pattern {slug} has dim {got}, expected {expected} (mixed-dim corpus)"
+            ),
+            Self::TenantPrivateMissingTenant => {
+                write!(f, "tenant-private corpus has no tenant_id")
+            }
+            Self::ReferenceCorpusWithTenant => {
+                write!(f, "reference corpus has a tenant_id (should be None)")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CorpusValidationError {}
 
 #[cfg(test)]
 mod tests {
@@ -158,6 +293,111 @@ mod tests {
         let c = Corpus::tenant_private("brand", "0.1", "acme");
         assert_eq!(c.tenant_id.as_deref(), Some("acme"));
         assert_eq!(c.retention, RetentionClass::TenantPrivate);
+    }
+
+    #[test]
+    fn empty_corpus_passes_validation() {
+        assert!(Corpus::curated("test", "0.1").is_valid());
+        assert!(Corpus::tenant_private("brand", "0.1", "acme").is_valid());
+    }
+
+    #[test]
+    fn corpus_missing_name_fails() {
+        let c = Corpus::curated("", "0.1");
+        assert!(c
+            .validate()
+            .iter()
+            .any(|e| matches!(e, CorpusValidationError::EmptyCorpusName)));
+    }
+
+    #[test]
+    fn corpus_missing_version_fails() {
+        let c = Corpus::curated("test", "");
+        assert!(c
+            .validate()
+            .iter()
+            .any(|e| matches!(e, CorpusValidationError::EmptyCorpusVersion)));
+    }
+
+    fn make_pattern(slug: &str, dim: usize) -> Pattern {
+        Pattern {
+            slug: slug.into(),
+            description: "p".into(),
+            dim,
+            vector_b64: "AAAA".into(),
+            tags: vec![],
+            origin: PatternOrigin::Curated,
+        }
+    }
+
+    #[test]
+    fn duplicate_pattern_slug_fails_validation() {
+        let mut c = Corpus::curated("test", "0.1");
+        c.patterns
+            .push(make_pattern("dup", DEFAULT_HDC_DIM));
+        c.patterns
+            .push(make_pattern("dup", DEFAULT_HDC_DIM));
+        assert!(c
+            .validate()
+            .iter()
+            .any(|e| matches!(e, CorpusValidationError::DuplicatePatternSlug(s) if s == "dup")));
+    }
+
+    #[test]
+    fn empty_pattern_slug_fails_validation() {
+        let mut c = Corpus::curated("test", "0.1");
+        c.patterns.push(make_pattern("", DEFAULT_HDC_DIM));
+        assert!(c
+            .validate()
+            .iter()
+            .any(|e| matches!(e, CorpusValidationError::EmptyPatternSlug)));
+    }
+
+    #[test]
+    fn mixed_dim_corpus_fails_validation() {
+        let mut c = Corpus::curated("test", "0.1");
+        c.patterns
+            .push(make_pattern("a", DEFAULT_HDC_DIM));
+        c.patterns.push(make_pattern("b", 5_000));
+        let errs = c.validate();
+        assert!(errs.iter().any(|e| matches!(
+            e,
+            CorpusValidationError::MixedDimension { slug, .. } if slug == "b"
+        )));
+    }
+
+    #[test]
+    fn tenant_private_missing_tenant_id_fails() {
+        let mut c = Corpus::curated("test", "0.1");
+        c.retention = RetentionClass::TenantPrivate;
+        assert!(c
+            .validate()
+            .iter()
+            .any(|e| matches!(e, CorpusValidationError::TenantPrivateMissingTenant)));
+    }
+
+    #[test]
+    fn reference_corpus_with_tenant_fails() {
+        let mut c = Corpus::tenant_private("brand", "0.1", "acme");
+        c.retention = RetentionClass::Reference;
+        // Still has tenant_id from tenant_private constructor.
+        assert!(c
+            .validate()
+            .iter()
+            .any(|e| matches!(e, CorpusValidationError::ReferenceCorpusWithTenant)));
+    }
+
+    #[test]
+    fn get_returns_pattern_by_slug() {
+        let mut c = Corpus::curated("test", "0.1");
+        c.patterns.push(make_pattern("alpha", DEFAULT_HDC_DIM));
+        c.patterns.push(make_pattern("beta", DEFAULT_HDC_DIM));
+        assert_eq!(c.get("beta").map(|p| p.slug.as_str()), Some("beta"));
+        assert!(c.get("missing").is_none());
+        assert!(c.contains("alpha"));
+        assert!(!c.contains("missing"));
+        assert_eq!(c.len(), 2);
+        assert!(!c.is_empty());
     }
 
     #[test]
