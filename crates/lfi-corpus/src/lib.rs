@@ -161,6 +161,62 @@ impl Corpus {
         self.patterns.is_empty()
     }
 
+    /// Find the top-K patterns most similar to `probe` by cosine
+    /// similarity over the HDC-decoded vector. Returns
+    /// `(&Pattern, similarity)` pairs sorted descending by
+    /// similarity.
+    ///
+    /// Patterns whose `vector_b64` fails to decode are skipped
+    /// silently (callers can pre-validate with `Corpus::validate`
+    /// if strict behaviour is needed).
+    ///
+    /// Behind the `hdc-encoder` feature — same constraint as the
+    /// codec it builds on.
+    #[cfg(feature = "hdc-encoder")]
+    pub fn find_similar(
+        &self,
+        probe: &hdc_core::BipolarVector,
+        top_k: usize,
+    ) -> Vec<(&Pattern, f64)> {
+        if top_k == 0 || self.patterns.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<(&Pattern, f64)> = self
+            .patterns
+            .iter()
+            .filter_map(|p| {
+                let v = crate::hdc_encoder::pattern_to_vector(p).ok()?;
+                let sim = probe.cosine_similarity(&v).ok()?;
+                Some((p, sim))
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(top_k);
+        scored
+    }
+
+    /// Like [`find_similar`] but returns only patterns scoring at
+    /// or above `min_similarity`. Combine with `top_k` to bound the
+    /// result list when you also want a quality floor.
+    ///
+    /// Returned list is sorted descending by similarity.
+    ///
+    /// Behind the `hdc-encoder` feature.
+    #[cfg(feature = "hdc-encoder")]
+    pub fn find_similar_above(
+        &self,
+        probe: &hdc_core::BipolarVector,
+        min_similarity: f64,
+        top_k: usize,
+    ) -> Vec<(&Pattern, f64)> {
+        self.find_similar(probe, top_k)
+            .into_iter()
+            .filter(|(_, s)| *s >= min_similarity)
+            .collect()
+    }
+
     /// Validate corpus invariants. Returns the list of every
     /// violation found — empty Vec means the corpus is sound.
     ///
@@ -279,6 +335,132 @@ impl std::error::Error for CorpusValidationError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hdc-encoder")]
+    mod find_similar_tests {
+        use super::super::*;
+        use crate::hdc_encoder;
+        use hdc_core::{BipolarVector, HdcParams};
+
+        fn make_corpus_with_seeds(seeds: &[(u64, &str)]) -> Corpus {
+            let mut c = Corpus::curated("similar-test", "0.1");
+            let params = HdcParams {
+                dimensions: 10_000,
+                ..Default::default()
+            };
+            for (seed, slug) in seeds {
+                let v = BipolarVector::random_seeded(&params, *seed);
+                c.patterns.push(hdc_encoder::pattern_from_vector(
+                    &v,
+                    *slug,
+                    "test pattern",
+                    vec![],
+                    PatternOrigin::Curated,
+                ));
+            }
+            c
+        }
+
+        #[test]
+        fn empty_corpus_returns_empty() {
+            let c = Corpus::curated("empty", "0.1");
+            let params = HdcParams::default();
+            let probe = BipolarVector::random_seeded(&params, 1);
+            assert_eq!(c.find_similar(&probe, 5).len(), 0);
+        }
+
+        #[test]
+        fn top_k_zero_returns_empty() {
+            let c = make_corpus_with_seeds(&[(1, "a"), (2, "b")]);
+            let params = HdcParams::default();
+            let probe = BipolarVector::random_seeded(&params, 99);
+            assert_eq!(c.find_similar(&probe, 0).len(), 0);
+        }
+
+        #[test]
+        fn exact_match_returns_self_first() {
+            let c = make_corpus_with_seeds(&[(1, "alpha"), (2, "beta"), (3, "gamma")]);
+            // Probe = exactly alpha's vector
+            let alpha_vec = hdc_encoder::pattern_to_vector(&c.patterns[0]).unwrap();
+            let results = c.find_similar(&alpha_vec, 3);
+            assert_eq!(results.len(), 3);
+            assert_eq!(results[0].0.slug, "alpha", "exact match should rank first");
+            // Self-similarity should be 1.0 (or very close after roundtrip).
+            assert!(
+                results[0].1 > 0.999,
+                "self-similarity should be ~1.0, got {}",
+                results[0].1
+            );
+            // Other two should be near orthogonal (random unrelated
+            // bipolar vectors at D=10k have cosine within ±0.02).
+            assert!(results[1].1.abs() < 0.05);
+            assert!(results[2].1.abs() < 0.05);
+        }
+
+        #[test]
+        fn results_sorted_descending() {
+            let c = make_corpus_with_seeds(&[(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")]);
+            let params = HdcParams::default();
+            let probe = BipolarVector::random_seeded(&params, 1);
+            let results = c.find_similar(&probe, 5);
+            assert_eq!(results.len(), 5);
+            for w in results.windows(2) {
+                assert!(
+                    w[0].1 >= w[1].1,
+                    "results out of order: {} < {}",
+                    w[0].1,
+                    w[1].1
+                );
+            }
+        }
+
+        #[test]
+        fn top_k_caps_result_size() {
+            let c = make_corpus_with_seeds(&[(1, "a"), (2, "b"), (3, "c"), (4, "d")]);
+            let params = HdcParams::default();
+            let probe = BipolarVector::random_seeded(&params, 99);
+            assert_eq!(c.find_similar(&probe, 2).len(), 2);
+        }
+
+        #[test]
+        fn find_similar_above_filters_by_threshold() {
+            let c = make_corpus_with_seeds(&[(1, "alpha"), (2, "beta")]);
+            let alpha_vec = hdc_encoder::pattern_to_vector(&c.patterns[0]).unwrap();
+
+            // Tight threshold — only the exact match passes.
+            let strict = c.find_similar_above(&alpha_vec, 0.95, 10);
+            assert_eq!(strict.len(), 1);
+            assert_eq!(strict[0].0.slug, "alpha");
+
+            // Slack threshold — both pass (since random bipolar
+            // pairs at D=10k tend to be near-orthogonal, the
+            // beta entry will have |cos| << 0.95 but >= -1.0).
+            // Set threshold = -1.0 to admit everything.
+            let loose = c.find_similar_above(&alpha_vec, -1.0, 10);
+            assert_eq!(loose.len(), 2);
+        }
+
+        #[test]
+        fn skips_patterns_with_bad_b64() {
+            // Build a corpus with one valid + one corrupt entry.
+            let mut c = make_corpus_with_seeds(&[(1, "good")]);
+            c.patterns.push(Pattern {
+                slug: "broken".into(),
+                description: "corrupt b64".into(),
+                dim: 10_000,
+                vector_b64: "###not-base64###".into(),
+                tags: vec![],
+                origin: PatternOrigin::Curated,
+            });
+            let params = HdcParams::default();
+            let probe = BipolarVector::random_seeded(&params, 99);
+            let results = c.find_similar(&probe, 5);
+            // The broken pattern is silently skipped — only "good"
+            // appears in results.
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].0.slug, "good");
+        }
+    }
 
     #[test]
     fn curated_constructor() {
