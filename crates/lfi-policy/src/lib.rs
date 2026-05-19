@@ -31,6 +31,8 @@
 use lfi_core::{RuleId, Strength};
 use serde::{Deserialize, Serialize};
 
+pub mod canonical;
+
 /// An atomic predicate that holds (or doesn't) of a proposal.
 ///
 /// Atoms are intentionally opaque at this layer — the
