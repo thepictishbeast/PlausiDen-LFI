@@ -136,6 +136,192 @@ impl PolicyLibrary {
             .filter(|r| r.hardness == Hardness::Soft)
             .count()
     }
+
+    /// Validate library invariants. Returns the list of every
+    /// violation found — empty Vec means the library is sound.
+    ///
+    /// Checks (in stable order):
+    ///
+    /// 1. Library name is non-empty.
+    /// 2. Library version is non-empty.
+    /// 3. No two rules share a `RuleId` (rule IDs are the audit
+    ///    log's primary key — duplicates would make a Decision's
+    ///    `traced_rules_fired` ambiguous).
+    /// 4. Every rule has at least one body literal (a rule with
+    ///    no body fires unconditionally — almost always an
+    ///    author bug; require `head` to be declared as a
+    ///    standalone Fact if that's the intent).
+    /// 5. Soft rules carry a non-zero weight (a Soft rule with
+    ///    `Strength::NONE` is a no-op; flag as author error).
+    /// 6. Every Atom has a non-empty name.
+    pub fn validate(&self) -> Vec<PolicyValidationError> {
+        let mut errors = Vec::new();
+        if self.name.is_empty() {
+            errors.push(PolicyValidationError::EmptyLibraryName);
+        }
+        if self.version.is_empty() {
+            errors.push(PolicyValidationError::EmptyLibraryVersion);
+        }
+        let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for rule in &self.rules {
+            let id_slug = rule.id.as_str().to_owned();
+            if !seen_ids.insert(id_slug.clone()) {
+                errors.push(PolicyValidationError::DuplicateRuleId(id_slug.clone()));
+            }
+            if rule.body.is_empty() {
+                errors.push(PolicyValidationError::EmptyRuleBody(id_slug.clone()));
+            }
+            if rule.hardness == Hardness::Soft && rule.weight == Strength::NONE {
+                errors.push(PolicyValidationError::SoftRuleZeroWeight(id_slug.clone()));
+            }
+            if rule.head.name.is_empty() {
+                errors.push(PolicyValidationError::EmptyAtomName(id_slug.clone()));
+            }
+            for lit in &rule.body {
+                if lit.atom.name.is_empty() {
+                    errors.push(PolicyValidationError::EmptyAtomName(id_slug.clone()));
+                }
+            }
+        }
+        errors
+    }
+
+    /// True iff `validate()` returns no errors.
+    pub fn is_valid(&self) -> bool {
+        self.validate().is_empty()
+    }
+}
+
+/// Validation errors returned by [`PolicyLibrary::validate`].
+///
+/// Each variant carries the offending rule's id (when applicable)
+/// so the operator can find the bad rule by slug grep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyValidationError {
+    /// `library.name` is the empty string.
+    EmptyLibraryName,
+    /// `library.version` is the empty string.
+    EmptyLibraryVersion,
+    /// Two rules share this `RuleId`.
+    DuplicateRuleId(String),
+    /// This rule's body has zero literals (fires unconditionally).
+    EmptyRuleBody(String),
+    /// A Soft rule with `Strength::NONE` is a no-op.
+    SoftRuleZeroWeight(String),
+    /// An Atom in this rule has an empty name.
+    EmptyAtomName(String),
+}
+
+impl std::fmt::Display for PolicyValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyLibraryName => write!(f, "library.name is empty"),
+            Self::EmptyLibraryVersion => write!(f, "library.version is empty"),
+            Self::DuplicateRuleId(id) => write!(f, "duplicate rule id: {id}"),
+            Self::EmptyRuleBody(id) => write!(f, "rule {id} has empty body"),
+            Self::SoftRuleZeroWeight(id) => {
+                write!(f, "soft rule {id} has zero weight (no-op)")
+            }
+            Self::EmptyAtomName(id) => write!(f, "rule {id} has an atom with empty name"),
+        }
+    }
+}
+
+impl std::error::Error for PolicyValidationError {}
+
+/// Fluent builder for [`Rule`]. Construct via [`Rule::builder`].
+///
+/// Less noisy than a struct literal; lets `canonical.rs` and
+/// downstream policy authors write rules in a single chained
+/// expression with sensible defaults (Hard hardness, FULL weight,
+/// empty body).
+#[derive(Debug, Clone)]
+pub struct RuleBuilder {
+    id: RuleId,
+    description: String,
+    hardness: Hardness,
+    weight: Strength,
+    body: Vec<Literal>,
+    head: Atom,
+}
+
+impl Rule {
+    /// Begin building a Rule. Defaults: Hard hardness, FULL
+    /// weight, empty body, head atom = `acceptable`.
+    pub fn builder(id: impl Into<String>) -> RuleBuilder {
+        RuleBuilder {
+            id: RuleId::new(id),
+            description: String::new(),
+            hardness: Hardness::Hard,
+            weight: Strength::FULL,
+            body: Vec::new(),
+            head: Atom {
+                name: "acceptable".to_owned(),
+                args: Vec::new(),
+            },
+        }
+    }
+}
+
+impl RuleBuilder {
+    /// One-line human description.
+    pub fn description(mut self, s: impl Into<String>) -> Self {
+        self.description = s.into();
+        self
+    }
+    /// Mark this rule as Soft + set the weight.
+    pub fn soft(mut self, weight: Strength) -> Self {
+        self.hardness = Hardness::Soft;
+        self.weight = weight;
+        self
+    }
+    /// Mark this rule as Hard (default).
+    pub fn hard(mut self) -> Self {
+        self.hardness = Hardness::Hard;
+        self.weight = Strength::FULL;
+        self
+    }
+    /// Add a positive-polarity literal to the body.
+    pub fn requires(mut self, atom_name: impl Into<String>, args: &[&str]) -> Self {
+        self.body.push(Literal {
+            atom: Atom {
+                name: atom_name.into(),
+                args: args.iter().map(|s| (*s).to_owned()).collect(),
+            },
+            polarity: Polarity::Positive,
+        });
+        self
+    }
+    /// Add a negative-polarity literal to the body.
+    pub fn forbids(mut self, atom_name: impl Into<String>, args: &[&str]) -> Self {
+        self.body.push(Literal {
+            atom: Atom {
+                name: atom_name.into(),
+                args: args.iter().map(|s| (*s).to_owned()).collect(),
+            },
+            polarity: Polarity::Negative,
+        });
+        self
+    }
+    /// Set the head atom (default `acceptable`).
+    pub fn head(mut self, atom_name: impl Into<String>, args: &[&str]) -> Self {
+        self.head = Atom {
+            name: atom_name.into(),
+            args: args.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        self
+    }
+    /// Finish — returns the constructed [`Rule`].
+    pub fn build(self) -> Rule {
+        Rule {
+            id: self.id,
+            description: self.description,
+            hardness: self.hardness,
+            weight: self.weight,
+            body: self.body,
+            head: self.head,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -147,6 +333,117 @@ mod tests {
         let l = PolicyLibrary::new("test", "0.1");
         assert_eq!(l.hard_count(), 0);
         assert_eq!(l.soft_count(), 0);
+    }
+
+    #[test]
+    fn empty_library_passes_validation() {
+        let l = PolicyLibrary::new("test", "0.1");
+        assert!(l.is_valid());
+    }
+
+    #[test]
+    fn library_missing_name_fails() {
+        let l = PolicyLibrary::new("", "0.1");
+        assert!(!l.is_valid());
+        assert!(l
+            .validate()
+            .iter()
+            .any(|e| matches!(e, PolicyValidationError::EmptyLibraryName)));
+    }
+
+    #[test]
+    fn library_missing_version_fails() {
+        let l = PolicyLibrary::new("test", "");
+        assert!(l
+            .validate()
+            .iter()
+            .any(|e| matches!(e, PolicyValidationError::EmptyLibraryVersion)));
+    }
+
+    #[test]
+    fn duplicate_rule_id_fails_validation() {
+        let mut l = PolicyLibrary::new("test", "0.1");
+        l.rules.push(
+            Rule::builder("dup")
+                .description("first")
+                .requires("a", &[])
+                .build(),
+        );
+        l.rules.push(
+            Rule::builder("dup")
+                .description("second")
+                .requires("b", &[])
+                .build(),
+        );
+        let errs = l.validate();
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, PolicyValidationError::DuplicateRuleId(id) if id == "dup")));
+    }
+
+    #[test]
+    fn empty_rule_body_fails_validation() {
+        let mut l = PolicyLibrary::new("test", "0.1");
+        l.rules
+            .push(Rule::builder("no-body").description("bare").build());
+        assert!(l
+            .validate()
+            .iter()
+            .any(|e| matches!(e, PolicyValidationError::EmptyRuleBody(id) if id == "no-body")));
+    }
+
+    #[test]
+    fn soft_rule_zero_weight_fails_validation() {
+        let mut l = PolicyLibrary::new("test", "0.1");
+        l.rules.push(
+            Rule::builder("noop-soft")
+                .description("noop")
+                .soft(Strength::NONE)
+                .requires("a", &[])
+                .build(),
+        );
+        assert!(l.validate().iter().any(
+            |e| matches!(e, PolicyValidationError::SoftRuleZeroWeight(id) if id == "noop-soft")
+        ));
+    }
+
+    #[test]
+    fn canonical_forge_default_validates() {
+        let l = crate::canonical::forge_default();
+        let errs = l.validate();
+        assert!(errs.is_empty(), "canonical library should validate; got: {errs:?}");
+    }
+
+    #[test]
+    fn rule_builder_constructs_hard_rule() {
+        let r = Rule::builder("test-hard")
+            .description("a test")
+            .requires("alpha", &["arg1"])
+            .head("acceptable", &[])
+            .build();
+        assert_eq!(r.id.as_str(), "test-hard");
+        assert_eq!(r.hardness, Hardness::Hard);
+        assert_eq!(r.weight, Strength::FULL);
+        assert_eq!(r.body.len(), 1);
+        assert_eq!(r.body[0].polarity, Polarity::Positive);
+    }
+
+    #[test]
+    fn rule_builder_forbids_adds_negative_literal() {
+        let r = Rule::builder("test")
+            .forbids("bad-thing", &[])
+            .build();
+        assert_eq!(r.body[0].polarity, Polarity::Negative);
+    }
+
+    #[test]
+    fn rule_builder_soft_sets_weight_and_hardness() {
+        let r = Rule::builder("test-soft")
+            .soft(Strength::new(0.7))
+            .requires("x", &[])
+            .build();
+        assert_eq!(r.hardness, Hardness::Soft);
+        assert_eq!(r.weight, Strength::new(0.7));
     }
 
     #[test]
