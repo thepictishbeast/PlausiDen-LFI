@@ -23,10 +23,19 @@ results retroactively, LFI inverts the model:
 
 | Crate         | Role                                              |
 |---------------|---------------------------------------------------|
-| `lfi-core`    | Typed transport: `Proposal`, `Decision`, `RuleId`, `Strength`, `Violation`. Imports Neurosymbolic-Toolkit. |
-| `lfi-policy`  | NeuPSL (Probabilistic Soft Logic) DSL — weighted rules, atoms, constraints. |
-| `lfi-corpus`  | HDC-encoded curated patterns + per-tenant private corpora. |
-| `lfi-critic`  | The `Critic` trait + `NoopCritic` + `LfiCritic` reference impl. |
+| `lfi-core`    | Typed transport: `Proposal`, `Decision`, `RuleId`, `Strength`, `Violation`. **Intentionally NSTK-free** — keeps transport swappable. |
+| `lfi-policy`  | NeuPSL (Probabilistic Soft Logic) DSL — weighted rules, atoms, constraints. Will import `neupsl` from NSTK (#35). |
+| `lfi-corpus`  | HDC-encoded curated patterns + per-tenant private corpora. Imports `hdc-core` from NSTK behind the `hdc-encoder` feature. |
+| `lfi-critic`  | The `Critic` trait + `NoopCritic` + `RejectAllCritic` + `ChainCritic` + `LfiCritic` reference impl. |
+
+### NSTK consumption is layered
+
+Neurosymbolic-Toolkit (NSTK) substrates plug into the substrate-
+consuming crates, NOT into `lfi-core`. This keeps `lfi-core`'s
+transport types compatible with downstream forks that bring their
+own (or no) substrate. Closes #34 by making the layering explicit:
+the right place to depend on NSTK is `lfi-corpus` / `lfi-policy`,
+not `lfi-core`.
 
 ## Upstream/downstream
 

@@ -13,12 +13,20 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
-# Task #34 note: this crate declares the typed transport
-# layer only. The Neurosymbolic-Toolkit substrates (hdc-core,
-# neupsl, lnn, vsa, hdlm, math-codec) are imported by
-# downstream crates (lfi-corpus consumes hdc-core, lfi-policy
-# consumes neupsl, etc.) when they actually compute against
-# the substrate.
+# lfi-core is the typed transport layer ONLY. It intentionally
+# does not depend on any Neurosymbolic-Toolkit (NSTK) substrate.
+# Keeping it lean lets downstream forks (Forge-LFI, app-specific
+# Critics) swap or omit substrates without rebuilding transport
+# types.
+#
+# NSTK consumption is delegated to the substrate-consuming crates:
+#   * lfi-corpus → hdc-core (feature-gated `hdc-encoder`)
+#   * lfi-policy → neupsl (#35 — pending wiring)
+#   * future: lnn / vsa / hdlm / math-codec on demand
+#
+# Closes #34 by making the architectural decision explicit:
+# "consume NSTK" was the right outcome, but at the substrate-
+# consuming layer, not in lfi-core itself.
 
 [lints.rust]
 unsafe_code = "forbid"
