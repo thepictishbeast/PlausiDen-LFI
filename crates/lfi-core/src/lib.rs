@@ -196,6 +196,35 @@ impl Decision {
     pub fn is_refine(&self) -> bool {
         matches!(self, Decision::Refine { .. })
     }
+    /// Variant-agnostic violations accessor. Returns `Reject`'s
+    /// `violations` slice, `Refine`'s `violated_rules` slice, or
+    /// an empty slice for `Accept`. Lets callers audit "what
+    /// failed" without matching three arms.
+    pub fn violations(&self) -> &[Violation] {
+        match self {
+            Self::Reject { violations } => violations,
+            Self::Refine { violated_rules, .. } => violated_rules,
+            Self::Accept { .. } => &[],
+        }
+    }
+    /// Variant-agnostic confidence. Returns the `Accept`
+    /// strength when accepted, `None` for `Reject`/`Refine`.
+    pub fn confidence(&self) -> Option<Strength> {
+        match self {
+            Self::Accept { confidence, .. } => Some(*confidence),
+            _ => None,
+        }
+    }
+    /// Variant-agnostic fired-rule accessor. Returns the
+    /// `traced_rules_fired` slice for `Accept`, empty otherwise.
+    pub fn fired_rules(&self) -> &[(RuleId, Strength)] {
+        match self {
+            Self::Accept {
+                traced_rules_fired, ..
+            } => traced_rules_fired,
+            _ => &[],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +256,49 @@ mod tests {
         assert!(a.is_accept() && !a.is_reject() && !a.is_refine());
         let r = Decision::Reject { violations: vec![] };
         assert!(r.is_reject());
+    }
+
+    #[test]
+    fn accept_exposes_confidence_and_fired_rules() {
+        let d = Decision::Accept {
+            confidence: Strength::new(0.92),
+            traced_rules_fired: vec![(RuleId::new("wcag-contrast"), Strength::new(0.95))],
+        };
+        assert_eq!(d.confidence().map(|s| s.get()), Some(0.92));
+        assert_eq!(d.fired_rules().len(), 1);
+        assert!(d.violations().is_empty());
+    }
+
+    #[test]
+    fn reject_exposes_violations() {
+        let v = Violation {
+            rule: RuleId::new("brand-voice-passive-cap"),
+            strength: Strength::new(0.8),
+            explanation: "passive-voice density above tenant cap".to_owned(),
+        };
+        let d = Decision::Reject {
+            violations: vec![v.clone()],
+        };
+        assert_eq!(d.violations().len(), 1);
+        assert_eq!(d.violations()[0].rule, v.rule);
+        assert!(d.confidence().is_none());
+        assert!(d.fired_rules().is_empty());
+    }
+
+    #[test]
+    fn refine_exposes_violations_via_violated_rules() {
+        let v = Violation {
+            rule: RuleId::new("hero-title-length"),
+            strength: Strength::new(0.6),
+            explanation: "title exceeds 70 chars".to_owned(),
+        };
+        let d = Decision::Refine {
+            targeted_regeneration_guidance: "shorten title".to_owned(),
+            violated_rules: vec![v],
+        };
+        assert_eq!(d.violations().len(), 1);
+        assert!(d.confidence().is_none());
+        assert!(d.fired_rules().is_empty());
     }
 
     #[test]
