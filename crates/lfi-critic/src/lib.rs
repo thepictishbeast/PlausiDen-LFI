@@ -23,7 +23,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use lfi_core::{Decision, Proposal, Strength};
+use lfi_core::{Decision, Proposal, RuleId, Strength, Violation};
 use lfi_corpus::Corpus;
 use lfi_policy::PolicyLibrary;
 
@@ -113,6 +113,103 @@ impl Critic for LfiCritic {
     }
 }
 
+/// Always-reject Critic. Useful in tests and as a kill-switch
+/// to halt a pipeline. Every proposal is rejected with the
+/// same configured reason.
+#[derive(Debug, Clone)]
+pub struct RejectAllCritic {
+    /// Reason returned in every Decision. Static so the Critic
+    /// stays `Send + Sync` cheaply.
+    pub reason: &'static str,
+}
+
+impl RejectAllCritic {
+    /// Construct a RejectAllCritic with the given reason.
+    pub const fn new(reason: &'static str) -> Self {
+        Self { reason }
+    }
+}
+
+impl Critic for RejectAllCritic {
+    fn evaluate(&self, _proposal: &Proposal) -> Decision {
+        Decision::Reject {
+            violations: vec![Violation {
+                rule: RuleId::new("reject-all"),
+                strength: Strength::FULL,
+                explanation: self.reason.to_owned(),
+            }],
+        }
+    }
+    fn ident(&self) -> &'static str {
+        "reject-all"
+    }
+}
+
+/// Compose multiple Critics in series. First non-Accept wins.
+///
+/// Use to layer cheap-and-fast checks before expensive ones, or to
+/// stack independently-authored Critics into one seam. Iterates in
+/// the order Critics were pushed.
+#[derive(Default)]
+pub struct ChainCritic {
+    members: Vec<Box<dyn Critic>>,
+    ident: &'static str,
+}
+
+impl ChainCritic {
+    /// Construct an empty chain with the given ident.
+    pub const fn new(ident: &'static str) -> Self {
+        Self {
+            members: Vec::new(),
+            ident,
+        }
+    }
+
+    /// Append a Critic to the chain. Earlier-pushed Critics run first.
+    pub fn push(mut self, critic: Box<dyn Critic>) -> Self {
+        self.members.push(critic);
+        self
+    }
+
+    /// Number of Critics in the chain.
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    /// True when the chain holds no Critics. An empty ChainCritic
+    /// accepts everything (vacuously).
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+}
+
+impl std::fmt::Debug for ChainCritic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChainCritic")
+            .field("ident", &self.ident)
+            .field("members", &self.members.len())
+            .finish()
+    }
+}
+
+impl Critic for ChainCritic {
+    fn evaluate(&self, proposal: &Proposal) -> Decision {
+        for member in &self.members {
+            let decision = member.evaluate(proposal);
+            if !decision.is_accept() {
+                return decision;
+            }
+        }
+        Decision::Accept {
+            confidence: Strength::FULL,
+            traced_rules_fired: vec![],
+        }
+    }
+    fn ident(&self) -> &'static str {
+        self.ident
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +238,63 @@ mod tests {
         };
         assert!(c.evaluate(&p).is_accept());
         assert_eq!(c.ident(), "lfi-reference");
+    }
+
+    #[test]
+    fn reject_all_rejects_with_configured_reason() {
+        let c = RejectAllCritic::new("kill-switch");
+        let p = Proposal {
+            kind: "test".into(),
+            payload: serde_json::json!({}),
+            context: Default::default(),
+        };
+        let d = c.evaluate(&p);
+        assert!(d.is_reject());
+        assert_eq!(d.violations().len(), 1);
+        assert_eq!(d.violations()[0].explanation, "kill-switch");
+        assert_eq!(c.ident(), "reject-all");
+    }
+
+    #[test]
+    fn chain_accepts_when_empty() {
+        let c = ChainCritic::new("empty-chain");
+        let p = Proposal {
+            kind: "test".into(),
+            payload: serde_json::json!({}),
+            context: Default::default(),
+        };
+        assert!(c.is_empty());
+        assert!(c.evaluate(&p).is_accept());
+    }
+
+    #[test]
+    fn chain_runs_in_order_first_rejection_wins() {
+        let chain = ChainCritic::new("test-chain")
+            .push(Box::new(NoopCritic))
+            .push(Box::new(RejectAllCritic::new("blocked-by-policy")))
+            .push(Box::new(RejectAllCritic::new("never-reached")));
+        let p = Proposal {
+            kind: "test".into(),
+            payload: serde_json::json!({}),
+            context: Default::default(),
+        };
+        let d = chain.evaluate(&p);
+        assert!(d.is_reject());
+        assert_eq!(d.violations()[0].explanation, "blocked-by-policy");
+        assert_eq!(chain.len(), 3);
+    }
+
+    #[test]
+    fn chain_accepts_when_all_members_accept() {
+        let chain = ChainCritic::new("happy-chain")
+            .push(Box::new(NoopCritic))
+            .push(Box::new(NoopCritic));
+        let p = Proposal {
+            kind: "test".into(),
+            payload: serde_json::json!({}),
+            context: Default::default(),
+        };
+        assert!(chain.evaluate(&p).is_accept());
     }
 
     /// Sanity: `dyn Critic` works for swap-at-runtime.

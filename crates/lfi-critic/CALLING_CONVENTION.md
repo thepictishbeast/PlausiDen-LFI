@@ -59,10 +59,23 @@ release breaks the audit chain's identity continuity.
 
 Reserved slugs:
 * `noop` — `NoopCritic` (always-Accept).
+* `reject-all` — `RejectAllCritic` (always-Reject, test + kill-switch).
 * `lfi-reference` — `LfiCritic` (this crate's reference impl).
 * `forge-default` — `ForgeCritic` in PlausiDen-Forge.
 
+Chain Critics (`ChainCritic`) carry their own caller-provided ident
+— they're composition wrappers, not reserved identities.
+
 Application Critics pick distinct slugs in their own namespace.
+
+## Canonical implementations shipped here
+
+| Impl | Behavior | When to use |
+|------|----------|-------------|
+| `NoopCritic` | Always Accept | Operator-authored content; non-AI pipelines that still want the seam |
+| `RejectAllCritic` | Always Reject | Tests, kill-switch, panic-stop |
+| `LfiCritic` | NeuPSL solve + optional HDC similarity | LLM-generated content needing real gate |
+| `ChainCritic` | Runs members in order; first non-Accept wins | Layering cheap-then-expensive checks; stacking independently-authored Critics |
 
 ## Decision payload contract
 
