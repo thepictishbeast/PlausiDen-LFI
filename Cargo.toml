@@ -43,14 +43,17 @@ serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror  = "2"
 
-# Neurosymbolic-Toolkit substrates. The toolkit ships as a
-# multi-crate workspace (hdc-core, neupsl, lnn, vsa, hdlm,
-# math-codec, neurosymbolic). Downstream crates that actually
-# consume a substrate add the specific sub-crate as a git dep
-# with `package = "hdc-core"`-style syntax. lfi-core does not
-# yet consume any substrate (task #34 says "Cargo dep, no code
-# contributions") — the dep is wired here when the first
-# consumer needs it.
+# Neurosymbolic-Toolkit substrates. Multi-crate git workspace.
+# Crates here add the specific sub-crate via Cargo's `package`
+# field when they consume one. Wired in opt-in features so
+# consumers that don't need the substrate stay lean.
+#
+# First consumer: lfi-corpus's `hdc-encoder` feature (HANDOFF
+# item #3 — Pattern::vector_b64 <-> hdc-core::BipolarVector
+# roundtrip). Behind a feature flag so apps that bring their
+# own encoder don't get NSTK as a transitive dep.
+hdc-core   = { git = "https://github.com/thepictishbeast/Neurosymbolic-Toolkit", package = "hdc-core" }
+base64     = "0.22"
 
 [profile.release]
 lto = "thin"

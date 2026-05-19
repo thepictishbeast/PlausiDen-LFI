@@ -37,6 +37,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(feature = "hdc-encoder")]
+pub mod hdc_encoder;
+
 use serde::{Deserialize, Serialize};
 
 /// HDC vector dimension. The Neurosymbolic-Toolkit's hdc-core
