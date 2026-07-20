@@ -2,3 +2,17 @@
 Cargo.lock
 *.swp
 .DS_Store
+
+# --- session scaffolding belongs in /tank/claude-workspace/<repo>/, NOT the repo (owner-go e8fb5b83) ---
+HANDOFF*.md
+*_HANDOFF*.md
+*_HANDOFF_*.md
+SESSION-LOG*
+SESSION_HANDOFF*
+GEMINI_UPDATE*.md
+GEMINI_BETA_*.md
+CLAUDE_UPDATE*.md
+*_bus.json
+lfi_bus.json
+RESUME-BRIEF*
+*resume-brief*
